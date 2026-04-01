@@ -53,11 +53,12 @@ interface ChatMessage {
  *
  * Layout:
  *   ╭── btw · <model> ───────────────────╮
- *   │ You ─────────────────────────────  │
+ *   │ You ─────────────────────────────  │  ← scrollable log area
  *   │  <user text>                        │
  *   │ btw ─────────────────────────────  │
  *   │  <assistant text>                   │
  *   │ [thinking...]                       │
+ *   │ ↑↓ scroll · N/M lines              │  ← scroll hint (when needed)
  *   ├─────────────────────────────────────┤
  *   │ <editor for next question>          │
  *   │ Enter · send   Esc · close          │
@@ -79,6 +80,9 @@ class BtwPanel implements Component {
 	private abortController: AbortController | null = null;
 
 	private editor: Editor;
+
+	// Scroll state: how many lines from the top of the log we have scrolled
+	private scrollOffset = 0;
 
 	private cachedLines: string[] | undefined;
 	private cachedWidth: number | undefined;
@@ -126,6 +130,8 @@ class BtwPanel implements Component {
 		if (this.thinking) return;
 
 		this.log.push({ role: "user", text });
+		// Auto-scroll to bottom whenever a new message is added
+		this.scrollToBottom();
 		this.invalidate();
 
 		const userMsg: UserMessage = {
@@ -152,7 +158,6 @@ class BtwPanel implements Component {
 				this.stopThinking();
 
 				if (response.stopReason === "aborted") {
-					// User cancelled — leave log as-is (last user msg already there)
 					this.invalidate();
 					this.tui.requestRender();
 					return;
@@ -167,12 +172,15 @@ class BtwPanel implements Component {
 				// Persist the assistant reply so follow-up questions keep full context
 				this.sideMessages.push(response);
 				this.log.push({ role: "assistant", text: replyText || "(empty response)" });
+				// Auto-scroll to bottom when assistant reply arrives
+				this.scrollToBottom();
 				this.invalidate();
 				this.tui.requestRender();
 			})
 			.catch((err: unknown) => {
 				this.stopThinking();
 				this.errorText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+				this.scrollToBottom();
 				this.invalidate();
 				this.tui.requestRender();
 			});
@@ -199,6 +207,54 @@ class BtwPanel implements Component {
 		}
 	}
 
+	// ── Scroll helpers ────────────────────────────────────────────────────────
+
+	/** Build the full unwrapped log lines so we can measure/scroll them. */
+	private buildAllLogLines(innerWidth: number): string[] {
+		const th = this.theme;
+		const lines: string[] = [];
+
+		for (const msg of this.log) {
+			if (msg.role === "user") {
+				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
+				lines.push(th.fg("accent", th.bold("You ")) + sep);
+			} else {
+				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
+				lines.push(th.fg("success", th.bold("btw ")) + sep);
+			}
+			const wrapped = wrapTextWithAnsi(msg.text, innerWidth - 2);
+			for (const line of wrapped) {
+				lines.push(" " + line);
+			}
+			lines.push("");
+		}
+
+		// Spinner / error at the bottom
+		if (this.thinking) {
+			const dots = "•".repeat(this.thinkingDots + 1);
+			const spaces = " ".repeat(3 - this.thinkingDots);
+			lines.push(th.fg("warning", `  thinking ${dots}${spaces}`));
+		} else if (this.errorText) {
+			for (const line of wrapTextWithAnsi(this.errorText, innerWidth - 2)) {
+				lines.push(th.fg("error", " " + line));
+			}
+		}
+
+		return lines;
+	}
+
+	/** Scroll so the very last line of the log is visible. */
+	private scrollToBottom(logLineCount?: number, viewport?: number): void {
+		// We call this without parameters when the log changes; actual clamping
+		// happens in render() with the real numbers.  Set to a large value so
+		// the clamp in render() does the right thing.
+		if (logLineCount !== undefined && viewport !== undefined) {
+			this.scrollOffset = Math.max(0, logLineCount - viewport);
+		} else {
+			this.scrollOffset = Number.MAX_SAFE_INTEGER;
+		}
+	}
+
 	// ── Component interface ──────────────────────────────────────────────────
 
 	handleInput(data: string): void {
@@ -215,6 +271,33 @@ class BtwPanel implements Component {
 			this.tui.requestRender();
 			return;
 		}
+
+		// Scroll the log area
+		if (matchesKey(data, Key.up)) {
+			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			this.scrollOffset++;
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.scrollOffset = Math.max(0, this.scrollOffset - 10);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scrollOffset += 10;
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+
 		this.editor.handleInput(data);
 		this.invalidate();
 		this.tui.requestRender();
@@ -228,15 +311,45 @@ class BtwPanel implements Component {
 		const th = this.theme;
 		const innerWidth = panelWidth - 2; // subtract the two border chars │ … │
 
-		const lines: string[] = [];
-
 		// Helper: wrap a line in side borders, padding to innerWidth
 		const bordered = (content: string): string => {
 			const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
 			return th.fg("borderAccent", "│") + content + pad + th.fg("borderAccent", "│");
 		};
 
-		// ── Top border with centred title ─────────────────────────────────
+		// ── Pre-render chrome to measure its exact height ─────────────────
+		// Chrome = top border(1) + divider(1) + editor lines + help(1) + bottom(1)
+		const editorLines = this.editor.render(innerWidth);
+		const chromeHeight = 1 + 1 + editorLines.length + 1 + 1; // top + divider + editor + help + bottom
+
+		// ── Available log viewport ────────────────────────────────────────
+		// The overlay limits total rendered lines to maxHeight (85% of terminal).
+		const termRows = (this.tui.terminal as any)?.rows ?? 24;
+		const maxPanelRows = Math.floor(termRows * 0.85);
+		// Reserve 1 extra row for the optional scroll-hint line inside the log area
+		const logViewport = Math.max(2, maxPanelRows - chromeHeight - 1);
+
+		// ── Build full log lines (all messages) ───────────────────────────
+		const allLogLines = this.buildAllLogLines(innerWidth);
+		const totalLogLines = allLogLines.length;
+
+		// ── Clamp scroll offset ───────────────────────────────────────────
+		const maxScroll = Math.max(0, totalLogLines - logViewport);
+		this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+
+		// ── Slice the visible window ──────────────────────────────────────
+		const visibleLog = allLogLines.slice(this.scrollOffset, this.scrollOffset + logViewport);
+
+		// ── Scroll hint line ──────────────────────────────────────────────
+		// Show when there is content above/below the visible window
+		const canScrollUp = this.scrollOffset > 0;
+		const canScrollDown = this.scrollOffset < maxScroll;
+		const needsScrollHint = canScrollUp || canScrollDown;
+
+		// ── Assemble final lines ──────────────────────────────────────────
+		const lines: string[] = [];
+
+		// Top border with centred title
 		const rawTitle = ` btw · ${this.modelShortId} `;
 		const titleStyled = th.fg("accent", rawTitle);
 		const totalDashes = Math.max(0, innerWidth - visibleWidth(rawTitle));
@@ -250,67 +363,42 @@ class BtwPanel implements Component {
 				th.fg("borderAccent", "╮"),
 		);
 
-		// ── Conversation log ──────────────────────────────────────────────
-		// Determine available vertical space: terminal rows minus fixed chrome
-		// (top border 1, divider 1, editor ~3, help 1, bottom border 1 = ~7)
-		const termRows = (this.tui.terminal as any)?.rows ?? 24;
-		const fixedRows = 8; // top + divider + ~3 editor + help + bottom
-		const maxLogLines = Math.max(4, termRows - fixedRows);
-
-		const logLines: string[] = [];
-
-		for (const msg of this.log) {
-			if (msg.role === "user") {
-				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
-				logLines.push(bordered(th.fg("accent", th.bold("You ")) + sep));
-			} else {
-				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
-				logLines.push(bordered(th.fg("success", th.bold("btw ")) + sep));
-			}
-			const wrapped = wrapTextWithAnsi(msg.text, innerWidth - 2);
-			for (const line of wrapped) {
-				logLines.push(bordered(" " + line));
-			}
-			logLines.push(bordered(""));
+		// Log area
+		for (const l of visibleLog) {
+			lines.push(truncateToWidth(bordered(l), panelWidth));
 		}
 
-		// Append spinner / error
-		if (this.thinking) {
-			const dots = "•".repeat(this.thinkingDots + 1);
-			const spaces = " ".repeat(3 - this.thinkingDots);
-			logLines.push(bordered(th.fg("warning", `  thinking ${dots}${spaces}`)));
-		} else if (this.errorText) {
-			for (const line of wrapTextWithAnsi(this.errorText, innerWidth - 2)) {
-				logLines.push(bordered(th.fg("error", " " + line)));
-			}
+		// Scroll hint (counts as a log-area row, hence the -1 reservation above)
+		if (needsScrollHint) {
+			const upPart = canScrollUp ? th.fg("dim", "↑ scroll up") : "";
+			const downPart = canScrollDown ? th.fg("dim", "↓ scroll down") : "";
+			const sep = canScrollUp && canScrollDown ? th.fg("dim", "  ·  ") : "";
+			const hintContent = "  " + upPart + sep + downPart;
+			lines.push(truncateToWidth(bordered(hintContent), panelWidth));
+		} else if (totalLogLines === 0) {
+			// Empty state — nothing rendered yet
+			lines.push(truncateToWidth(bordered(""), panelWidth));
 		}
 
-		// Clamp to maxLogLines (keep the tail = most recent)
-		for (const l of logLines.slice(-maxLogLines)) {
-			lines.push(truncateToWidth(l, panelWidth));
-		}
-
-		// ── Divider ───────────────────────────────────────────────────────
+		// Divider
 		lines.push(
 			th.fg("borderAccent", "├") +
 				th.fg("dim", "─".repeat(innerWidth)) +
 				th.fg("borderAccent", "┤"),
 		);
 
-		// ── Input editor ──────────────────────────────────────────────────
-		const editorLines = this.editor.render(innerWidth);
+		// Input editor (lines already computed above)
 		for (const el of editorLines) {
-			// The editor renders without outer border, add ours
 			lines.push(truncateToWidth(th.fg("borderAccent", "│") + el + th.fg("borderAccent", "│"), panelWidth));
 		}
 
-		// ── Help text ─────────────────────────────────────────────────────
+		// Help text
 		const helpText = this.thinking
-			? th.fg("dim", "  Ctrl+C · cancel request   Esc · close panel")
-			: th.fg("dim", "  Enter · send   Esc · close");
+			? th.fg("dim", "  Ctrl+C · cancel   Esc · close")
+			: th.fg("dim", "  Enter · send   ↑↓ · scroll   Esc · close");
 		lines.push(bordered(helpText));
 
-		// ── Bottom border ─────────────────────────────────────────────────
+		// Bottom border
 		lines.push(
 			th.fg("borderAccent", "╰") +
 				th.fg("borderAccent", "─".repeat(innerWidth)) +

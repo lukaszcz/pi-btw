@@ -2,8 +2,12 @@
   "name": "pi-btw",
   "version": "1.0.0",
   "description": "Ask side-questions in an isolated overlay without touching the main conversation context",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./btw.ts"]
+    "extensions": [
+      "./btw.ts"
+    ]
   }
 }
