@@ -12,7 +12,9 @@ A floating overlay panel opens. It's seeded with a **read-only snapshot** of the
 
 ### Read-only tools
 
-The side conversation has access to **read-only tools** — `read`, `grep`, `find`, and `ls` — so the model can look things up in your codebase to answer your question. Write-oriented tools (`bash`, `write`, `edit`, etc.) are explicitly blocked; if the model tries to call one it gets an error message telling it to stick to the read-only set.
+The side conversation has access to **read-only tools** — `read`, `grep`, `find`, and `ls` — so the model can look things up in your codebase to answer your question. The model runs a full agent loop: it can make multiple tool calls in sequence, see their results, and reason further before giving you a final answer.
+
+Write-oriented tools (`bash`, `write`, `edit`, etc.) are explicitly blocked. If the model tries to call a known-but-disallowed tool it gets a targeted error message; truly unknown tools get a generic "not available" response. Either way, your project is never modified.
 
 This means you can ask things like _"what does the `handleInput` method do?"_ or _"find all usages of `convertToLlm`"_ and the model will browse your files to give you an informed answer — without any risk of modifying your project.
 
@@ -22,12 +24,20 @@ This means you can ask things like _"what does the `handleInput` method do?"_ or
 |-----|--------|
 | `Enter` | Send your question / follow-up |
 | `Shift+Enter` | Insert a newline in the editor |
-| `Esc` | Close the panel (aborts any in-flight request) |
-| `Ctrl+C` | Cancel the current request (panel stays open) |
+| `Esc` | Cancel the current request if thinking, otherwise close the panel |
+| `Ctrl+C` | Copy the last assistant message to clipboard |
+| `↑` / `↓` | Scroll the log area (1 line) |
+| `PageUp` / `PageDown` | Scroll the log area (10 lines) |
 
 ## Installation
 
-Copy `btw.ts` to your pi extensions directory:
+Install as a pi package:
+
+```bash
+pi install pi-btw
+```
+
+Or copy `btw.ts` to your pi extensions directory manually:
 
 ```bash
 cp btw.ts ~/.pi/agent/extensions/btw.ts
@@ -46,13 +56,13 @@ pi -e ./pi-btw/btw.ts
 1. When you run `/btw <question>`, the extension:
    - Reads the current session branch via `ctx.sessionManager.getBranch()`
    - Converts those messages to LLM format with `convertToLlm()`
-   - Opens a floating overlay using `ctx.ui.custom({ overlay: true })`
+   - Opens a floating overlay using `ctx.ui.custom()` with `overlay: true` (90% width/height, centred)
 
 2. Inside the overlay, every LLM call is:
    - Passed `contextMessages` (the snapshot) + `sideMessages` (this panel's history)
    - Given read-only tools (`read`, `grep`, `find`, `ls`) created via `createReadOnlyTools()` from pi's SDK
    - Made via `complete()` from `@mariozechner/pi-ai` directly — no session involvement
-   - Aborted cleanly when you press Esc
+   - Run in an agent loop: the model can request tools, see results, and continue until it produces a final text response or is aborted
 
 3. The main session's `appendMessage`, `sendMessage`, etc. are **never called**.
    The overlay is purely display-side; closing it leaves zero traces in the main session.
