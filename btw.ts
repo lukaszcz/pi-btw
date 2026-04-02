@@ -603,7 +603,7 @@ class BtwPanel implements Component {
 			return;
 		}
 		copyToClipboard(lastAssistant.text);
-		this.showCopyFeedback("Copied to clipboard!");
+		this.showCopyFeedback("Copied response to clipboard!");
 	}
 
 	private showCopyFeedback(msg: string): void {
