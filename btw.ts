@@ -15,7 +15,7 @@ import type {
 	ExtensionAPI,
 	SessionEntry,
 } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, createReadOnlyTools } from "@mariozechner/pi-coding-agent";
+import { convertToLlm, createReadOnlyTools, copyToClipboard } from "@mariozechner/pi-coding-agent";
 import {
 	matchesKey,
 	Key,
@@ -79,6 +79,8 @@ class BtwPanel implements Component {
 	private thinkingDots = 0;
 	private thinkingTimer: ReturnType<typeof setInterval> | null = null;
 	private errorText = "";
+	private copyFeedback = "";
+	private copyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 	private abortController: AbortController | null = null;
 
@@ -425,17 +427,21 @@ class BtwPanel implements Component {
 	// ── Component interface ──────────────────────────────────────────────────
 
 	handleInput(data: string): void {
-		// Escape always closes (even while thinking — aborts the request)
+		// Escape: cancel thinking if active, otherwise close the panel
 		if (matchesKey(data, Key.escape)) {
-			this.close();
+			if (this.thinking) {
+				this.abortController?.abort();
+				this.stopThinking();
+				this.invalidate();
+				this.tui.requestRender();
+			} else {
+				this.close();
+			}
 			return;
 		}
-		// While thinking, Ctrl+C also aborts
-		if (this.thinking && matchesKey(data, Key.ctrl("c"))) {
-			this.abortController?.abort();
-			this.stopThinking();
-			this.invalidate();
-			this.tui.requestRender();
+		// Ctrl+C: copy last assistant message to clipboard
+		if (matchesKey(data, Key.ctrl("c"))) {
+			this.copyLastAssistantMessage();
 			return;
 		}
 
@@ -560,9 +566,12 @@ class BtwPanel implements Component {
 		}
 
 		// Help text
-		const helpText = this.thinking
-			? th.fg("dim", "  Ctrl+C · cancel   Esc · close")
-			: th.fg("dim", "  Enter · send   ↑↓ · scroll   Esc · close");
+		const helpParts = this.thinking
+			? "  Esc · cancel"
+			: "  Enter · send   ↑↓ · scroll   Ctrl+C · copy   Esc · close";
+		const helpText = this.copyFeedback
+			? th.fg("success", `  ${this.copyFeedback}`)
+			: th.fg("dim", helpParts);
 		lines.push(bordered(helpText));
 
 		// Bottom border
@@ -585,6 +594,31 @@ class BtwPanel implements Component {
 		this.editor.invalidate();
 	}
 
+	// ── Copy to clipboard ────────────────────────────────────────────────────
+
+	private copyLastAssistantMessage(): void {
+		const lastAssistant = [...this.log].reverse().find((m) => m.role === "assistant");
+		if (!lastAssistant) {
+			this.showCopyFeedback("No assistant message to copy");
+			return;
+		}
+		copyToClipboard(lastAssistant.text);
+		this.showCopyFeedback("Copied to clipboard!");
+	}
+
+	private showCopyFeedback(msg: string): void {
+		if (this.copyFeedbackTimer) clearTimeout(this.copyFeedbackTimer);
+		this.copyFeedback = msg;
+		this.invalidate();
+		this.tui.requestRender();
+		this.copyFeedbackTimer = setTimeout(() => {
+			this.copyFeedback = "";
+			this.copyFeedbackTimer = null;
+			this.invalidate();
+			this.tui.requestRender();
+		}, 2000);
+	}
+
 	// ── Lifecycle ────────────────────────────────────────────────────────────
 
 	private close(): void {
@@ -596,6 +630,7 @@ class BtwPanel implements Component {
 	dispose(): void {
 		this.abortController?.abort();
 		this.stopThinking();
+		if (this.copyFeedbackTimer) clearTimeout(this.copyFeedbackTimer);
 	}
 }
 
