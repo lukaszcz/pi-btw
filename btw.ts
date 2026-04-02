@@ -472,7 +472,7 @@ class BtwPanel implements Component {
 
 	render(width: number): string[] {
 		// Fixed inner width: 70% of terminal, min 60, max terminal width
-		const panelWidth = Math.min(width, Math.max(60, Math.floor(width * 0.72)));
+		const panelWidth = Math.max(66, width);
 		if (this.cachedLines && this.cachedWidth === panelWidth) return this.cachedLines;
 
 		const th = this.theme;
@@ -492,7 +492,7 @@ class BtwPanel implements Component {
 		// ── Available log viewport ────────────────────────────────────────
 		// The overlay limits total rendered lines to maxHeight (85% of terminal).
 		const termRows = (this.tui.terminal as any)?.rows ?? 24;
-		const maxPanelRows = Math.floor(termRows * 0.85);
+		const maxPanelRows = Math.floor(termRows * 0.90);
 		// Reserve 1 extra row for the optional scroll-hint line inside the log area
 		const logViewport = Math.max(2, maxPanelRows - chromeHeight - 1);
 
@@ -666,9 +666,9 @@ export default function (pi: ExtensionAPI) {
 				{
 					overlay: true,
 					overlayOptions: {
-						width: "72%",
-						minWidth: 64,
-						maxHeight: "85%",
+						width: "90%",
+						minWidth: 66,
+						maxHeight: "90%",
 						anchor: "center",
 					},
 				},
