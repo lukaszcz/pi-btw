@@ -15,7 +15,7 @@ import type {
 	ExtensionAPI,
 	SessionEntry,
 } from "@mariozechner/pi-coding-agent";
-import { convertToLlm } from "@mariozechner/pi-coding-agent";
+import { convertToLlm, createReadOnlyTools } from "@mariozechner/pi-coding-agent";
 import {
 	matchesKey,
 	Key,
@@ -27,7 +27,10 @@ import {
 	type TUI,
 	type Component,
 } from "@mariozechner/pi-tui";
-import type { Message, UserMessage, Model } from "@mariozechner/pi-ai";
+import type { Message, UserMessage, Model, Tool, ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
+
+/** The tool type returned by createReadOnlyTools — AgentTool with execute(). */
+type ExecutableTool = ReturnType<typeof createReadOnlyTools>[number];
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -42,7 +45,7 @@ function buildContextMessages(branch: SessionEntry[]): Message[] {
 // ─── Display message ──────────────────────────────────────────────────────────
 
 interface ChatMessage {
-	role: "user" | "assistant";
+	role: "user" | "assistant" | "tool";
 	text: string;
 }
 
@@ -99,6 +102,8 @@ class BtwPanel implements Component {
 		private readonly apiKey: string,
 		private readonly apiHeaders: Record<string, string> | undefined,
 		private readonly systemPrompt: string,
+		private readonly agentTools: ExecutableTool[],
+		private readonly disallowedToolNames: Set<string>,
 	) {
 		this.contextMessages = contextMessages;
 
@@ -120,11 +125,33 @@ class BtwPanel implements Component {
 			this.sendQuestion(trimmed);
 		};
 
+		// Inject a preamble so the model understands the side-conversation context
+		const availableNames = this.agentTools.map((t) => t.name).join(", ");
+		this.sideMessages.push({
+			role: "user",
+			content: [{
+				type: "text",
+				text: `[This is a side conversation. The user is asking quick questions alongside the main conversation. ` +
+					`Only read-only tools are available here (${availableNames}). ` +
+					`Do not use tools that modify the filesystem such as bash, write, or edit — they will fail.]`,
+			}],
+			timestamp: Date.now(),
+		});
+
 		// Start with the initial question from the /btw command
 		this.sendQuestion(firstQuestion);
 	}
 
 	// ── Sending ──────────────────────────────────────────────────────────────
+
+	/** Convert AgentTool[] to Tool[] for the LLM context (schema only, no execute). */
+	private get toolSchemas(): Tool[] {
+		return this.agentTools.map((t) => ({
+			name: t.name,
+			description: t.description,
+			parameters: t.parameters,
+		}));
+	}
 
 	private sendQuestion(text: string): void {
 		if (this.thinking) return;
@@ -144,46 +171,179 @@ class BtwPanel implements Component {
 		this.startThinking();
 		this.errorText = "";
 
-		// Full context for the LLM = original main context + side conversation so far
-		const messages: Message[] = [...this.contextMessages, ...this.sideMessages];
-
 		this.abortController = new AbortController();
+		this.runAgentLoop();
+	}
 
-		complete(
-			this.model,
-			{ systemPrompt: this.systemPrompt, messages },
-			{ apiKey: this.apiKey, headers: this.apiHeaders, signal: this.abortController.signal },
-		)
-			.then((response) => {
-				this.stopThinking();
+	/**
+	 * Run the agent loop: call the LLM, execute any tool calls, repeat until
+	 * the LLM stops requesting tools or an error/abort occurs.
+	 */
+	private async runAgentLoop(): Promise<void> {
+		try {
+			while (true) {
+				if (this.abortController?.signal.aborted) break;
+
+				const messages: Message[] = [...this.contextMessages, ...this.sideMessages];
+				const tools = this.agentTools.length > 0 ? this.toolSchemas : undefined;
+
+				const response = await complete(
+					this.model,
+					{ systemPrompt: this.systemPrompt, messages, tools },
+					{ apiKey: this.apiKey, headers: this.apiHeaders, signal: this.abortController!.signal },
+				);
 
 				if (response.stopReason === "aborted") {
+					this.stopThinking();
 					this.invalidate();
 					this.tui.requestRender();
 					return;
 				}
 
+				// Persist the assistant message in side context
+				this.sideMessages.push(response);
+
+				// Extract text content for display
 				const replyText = response.content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map((c) => c.text)
 					.join("\n")
 					.trim();
 
-				// Persist the assistant reply so follow-up questions keep full context
-				this.sideMessages.push(response);
-				this.log.push({ role: "assistant", text: replyText || "(empty response)" });
-				// Auto-scroll to bottom when assistant reply arrives
-				this.scrollToBottom();
-				this.invalidate();
-				this.tui.requestRender();
-			})
-			.catch((err: unknown) => {
-				this.stopThinking();
-				this.errorText = `Error: ${err instanceof Error ? err.message : String(err)}`;
-				this.scrollToBottom();
-				this.invalidate();
-				this.tui.requestRender();
-			});
+				if (replyText) {
+					this.log.push({ role: "assistant", text: replyText });
+					this.scrollToBottom();
+					this.invalidate();
+					this.tui.requestRender();
+				}
+
+				// If the LLM wants to use tools, execute them
+				if (response.stopReason === "toolUse") {
+					const toolCalls = response.content.filter(
+						(c): c is ToolCall => c.type === "toolCall",
+					);
+
+					for (const tc of toolCalls) {
+						if (this.abortController?.signal.aborted) break;
+
+						const tool = this.agentTools.find((t) => t.name === tc.name);
+						if (!tool) {
+							// Distinguish known-but-disallowed tools from truly unknown ones
+							const availableNames = this.agentTools.map((t) => t.name).join(", ");
+							const errText = this.disallowedToolNames.has(tc.name)
+								? `Tool "${tc.name}" is not available in the side conversation. ` +
+								  `Only read-only tools are allowed here: ${availableNames}. ` +
+								  `Do not attempt to use ${tc.name} again.`
+								: `Unknown tool: ${tc.name}. Available tools: ${availableNames}.`;
+							const errorResult: ToolResultMessage = {
+								role: "toolResult",
+								toolCallId: tc.id,
+								toolName: tc.name,
+								content: [{ type: "text", text: errText }],
+								isError: true,
+								timestamp: Date.now(),
+							};
+							this.sideMessages.push(errorResult);
+							this.log.push({ role: "tool", text: `⚠ ${errText}` });
+							continue;
+						}
+
+						// Show tool invocation in log
+						const toolLabel = this.formatToolCall(tc);
+						this.log.push({ role: "tool", text: `⚙ ${toolLabel}` });
+						this.scrollToBottom();
+						this.invalidate();
+						this.tui.requestRender();
+
+						try {
+							const result = await tool.execute(
+								tc.id,
+								tc.arguments,
+								this.abortController?.signal,
+							);
+
+							const toolResult: ToolResultMessage = {
+								role: "toolResult",
+								toolCallId: tc.id,
+								toolName: tc.name,
+								content: result.content,
+								details: result.details,
+								isError: false,
+								timestamp: Date.now(),
+							};
+							this.sideMessages.push(toolResult);
+
+							// Show brief result summary
+							const resultText = result.content
+								.filter((c): c is { type: "text"; text: string } => c.type === "text")
+								.map((c) => c.text)
+								.join("\n");
+							const preview = resultText.length > 200
+								? resultText.slice(0, 200) + "…"
+								: resultText;
+							if (preview) {
+								this.log.push({ role: "tool", text: `  ✓ ${preview}` });
+							}
+						} catch (err: unknown) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							const toolResult: ToolResultMessage = {
+								role: "toolResult",
+								toolCallId: tc.id,
+								toolName: tc.name,
+								content: [{ type: "text", text: errMsg }],
+								isError: true,
+								timestamp: Date.now(),
+							};
+							this.sideMessages.push(toolResult);
+							this.log.push({ role: "tool", text: `  ✗ ${errMsg}` });
+						}
+
+						this.scrollToBottom();
+						this.invalidate();
+						this.tui.requestRender();
+					}
+
+					// Continue the loop — the LLM will see the tool results
+					continue;
+				}
+
+				// stopReason is "stop", "length", or "error" — we're done
+				if (!replyText) {
+					this.log.push({ role: "assistant", text: "(empty response)" });
+					this.scrollToBottom();
+					this.invalidate();
+					this.tui.requestRender();
+				}
+
+				break;
+			}
+
+			this.stopThinking();
+			this.invalidate();
+			this.tui.requestRender();
+		} catch (err: unknown) {
+			this.stopThinking();
+			this.errorText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			this.scrollToBottom();
+			this.invalidate();
+			this.tui.requestRender();
+		}
+	}
+
+	/** Format a tool call for display in the log. */
+	private formatToolCall(tc: ToolCall): string {
+		switch (tc.name) {
+			case "read":
+				return `read ${tc.arguments.path ?? ""}${tc.arguments.offset ? ` (offset: ${tc.arguments.offset})` : ""}`;
+			case "grep":
+				return `grep ${JSON.stringify(tc.arguments.pattern ?? "")}${tc.arguments.path ? ` in ${tc.arguments.path}` : ""}`;
+			case "find":
+				return `find ${JSON.stringify(tc.arguments.pattern ?? "")}${tc.arguments.path ? ` in ${tc.arguments.path}` : ""}`;
+			case "ls":
+				return `ls ${tc.arguments.path ?? "."}`;
+			default:
+				return `${tc.name} ${JSON.stringify(tc.arguments)}`;
+		}
 	}
 
 	// ── Spinner ──────────────────────────────────────────────────────────────
@@ -218,6 +378,13 @@ class BtwPanel implements Component {
 			if (msg.role === "user") {
 				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
 				lines.push(th.fg("accent", th.bold("You ")) + sep);
+			} else if (msg.role === "tool") {
+				// Tool messages are shown inline without a header separator
+				const wrapped = wrapTextWithAnsi(msg.text, innerWidth - 2);
+				for (const line of wrapped) {
+					lines.push(" " + th.fg("dim", line));
+				}
+				continue;
 			} else {
 				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
 				lines.push(th.fg("success", th.bold("btw ")) + sep);
@@ -469,6 +636,16 @@ export default function (pi: ExtensionAPI) {
 			// Reuse the active system prompt so the side-agent behaves consistently
 			const systemPrompt = ctx.getSystemPrompt();
 
+			// Create read-only tools (read, grep, find, ls) scoped to the current working directory
+			const readOnlyTools = createReadOnlyTools(ctx.cwd);
+			const readOnlyNames = new Set(readOnlyTools.map((t) => t.name));
+
+			// Collect names of tools the model knows about but aren't allowed here
+			const allToolNames = pi.getAllTools().map((t) => t.name);
+			const disallowedToolNames = new Set(
+				allToolNames.filter((name) => !readOnlyNames.has(name)),
+			);
+
 			await ctx.ui.custom<null>(
 				(tui, theme, keybindings, done) =>
 					new BtwPanel(
@@ -483,6 +660,8 @@ export default function (pi: ExtensionAPI) {
 						auth.apiKey!,
 						auth.headers,
 						systemPrompt,
+						readOnlyTools,
+						disallowedToolNames,
 					),
 				{
 					overlay: true,
