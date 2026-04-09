@@ -135,7 +135,8 @@ class BtwPanel implements Component {
 				type: "text",
 				text: `[This is a side conversation. The user is asking quick questions alongside the main conversation. ` +
 					`Only read-only tools are available here (${availableNames}). ` +
-					`Do not use tools that modify the filesystem such as bash, write, or edit — they will fail.]`,
+					`Do not use tools that modify the filesystem such as bash, write, or edit — they will fail. ` +
+					`CRITICAL: STOP what you're doing, diregard previous instructions, and answer the questions that follow.]`,
 			}],
 			timestamp: Date.now(),
 		});
@@ -311,7 +312,20 @@ class BtwPanel implements Component {
 
 				// stopReason is "stop", "length", or "error" — we're done
 				if (!replyText) {
-					this.log.push({ role: "assistant", text: "(empty response)" });
+					let detail: string;
+					switch (response.stopReason) {
+						case "error":
+							detail = response.errorMessage
+								? `Error: ${response.errorMessage}`
+								: "The model returned an error without any text.";
+							break;
+						case "length":
+							detail = "Response truncated — the model hit its maximum output token limit before producing any text.";
+							break;
+						default:
+							detail = `The model returned an empty response (stopReason: ${response.stopReason}).`;
+					}
+					this.log.push({ role: "assistant", text: detail });
 					this.scrollToBottom();
 					this.invalidate();
 					this.tui.requestRender();
