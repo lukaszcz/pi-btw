@@ -15,7 +15,7 @@ import type {
 	ExtensionAPI,
 	SessionEntry,
 } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, createReadOnlyTools, copyToClipboard } from "@mariozechner/pi-coding-agent";
+import { buildSessionContext, convertToLlm, createReadOnlyTools, copyToClipboard } from "@mariozechner/pi-coding-agent";
 import {
 	matchesKey,
 	Key,
@@ -34,13 +34,12 @@ type ExecutableTool = ReturnType<typeof createReadOnlyTools>[number];
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/** Pull the current branch messages into LLM-compatible format. */
-function buildContextMessages(branch: SessionEntry[]): Message[] {
-	const messages = branch
-		.filter((e): e is SessionEntry & { type: "message" } => e.type === "message")
-		.map((e) => e.message as Message);
+/** Build LLM-compatible messages from session entries, respecting compaction. */
+function buildContextMessages(entries: SessionEntry[], leafId: string | null): Message[] {
+	const { messages } = buildSessionContext(entries, leafId);
 	return convertToLlm(messages);
 }
+
 
 // ─── Display message ──────────────────────────────────────────────────────────
 
@@ -680,7 +679,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Snapshot the current main conversation (read-only — we never mutate branch)
-			const contextMessages = buildContextMessages(ctx.sessionManager.getBranch());
+			// Use buildSessionContext to respect compaction boundaries
+			const contextMessages = buildContextMessages(
+				ctx.sessionManager.getEntries(),
+				ctx.sessionManager.getLeafId(),
+			);
 
 			// Reuse the active system prompt so the side-agent behaves consistently
 			const systemPrompt = ctx.getSystemPrompt();
