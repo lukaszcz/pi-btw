@@ -10,7 +10,7 @@
  * session — the main context is untouched.
  */
 
-import { complete } from "@mariozechner/pi-ai";
+import { completeSimple } from "@mariozechner/pi-ai";
 import type {
 	ExtensionAPI,
 	SessionEntry,
@@ -27,7 +27,7 @@ import {
 	type TUI,
 	type Component,
 } from "@mariozechner/pi-tui";
-import type { Message, UserMessage, Model, Tool, ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
+import type { Message, UserMessage, Model, Tool, ToolCall, ToolResultMessage, ThinkingLevel } from "@mariozechner/pi-ai";
 
 /** The tool type returned by createReadOnlyTools — AgentTool with execute(). */
 type ExecutableTool = ReturnType<typeof createReadOnlyTools>[number];
@@ -105,6 +105,7 @@ class BtwPanel implements Component {
 		private readonly systemPrompt: string,
 		private readonly agentTools: ExecutableTool[],
 		private readonly disallowedToolNames: Set<string>,
+		private readonly thinkingLevel: ThinkingLevel | undefined,
 	) {
 		this.contextMessages = contextMessages;
 
@@ -189,10 +190,13 @@ class BtwPanel implements Component {
 				const messages: Message[] = [...this.contextMessages, ...this.sideMessages];
 				const tools = this.agentTools.length > 0 ? this.toolSchemas : undefined;
 
-				const response = await complete(
+				const reasoning = this.model.reasoning && this.thinkingLevel && this.thinkingLevel !== "off"
+					? this.thinkingLevel
+					: undefined;
+				const response = await completeSimple(
 					this.model,
 					{ systemPrompt: this.systemPrompt, messages, tools },
-					{ apiKey: this.apiKey, headers: this.apiHeaders, signal: this.abortController!.signal },
+					{ apiKey: this.apiKey, headers: this.apiHeaders, signal: this.abortController!.signal, ...(reasoning ? { reasoning } : {}) },
 				);
 
 				if (response.stopReason === "aborted") {
@@ -714,6 +718,7 @@ export default function (pi: ExtensionAPI) {
 						systemPrompt,
 						readOnlyTools,
 						disallowedToolNames,
+						pi.getThinkingLevel(),
 					),
 				{
 					overlay: true,
