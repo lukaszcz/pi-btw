@@ -90,6 +90,7 @@ class BtwPanel implements Component {
 
 	private cachedLines: string[] | undefined;
 	private cachedWidth: number | undefined;
+	private cachedRows: number | undefined;
 
 	constructor(
 		private readonly tui: TUI,
@@ -143,6 +144,11 @@ class BtwPanel implements Component {
 
 		// Start with the initial question from the /btw command
 		this.sendQuestion(firstQuestion);
+
+		// Overlays are composited into pi's scrollback-backed virtual viewport.
+		// Force one full redraw after mounting so placement is calculated against
+		// a fresh viewport instead of stale incremental-render state.
+		process.nextTick(() => (this.tui as any).requestRender(true));
 	}
 
 	// ── Sending ──────────────────────────────────────────────────────────────
@@ -163,6 +169,7 @@ class BtwPanel implements Component {
 		// Auto-scroll to bottom whenever a new message is added
 		this.scrollToBottom();
 		this.invalidate();
+		this.requestRender(true);
 
 		const userMsg: UserMessage = {
 			role: "user",
@@ -202,7 +209,7 @@ class BtwPanel implements Component {
 				if (response.stopReason === "aborted") {
 					this.stopThinking();
 					this.invalidate();
-					this.tui.requestRender();
+					this.requestRender(true);
 					return;
 				}
 
@@ -220,7 +227,7 @@ class BtwPanel implements Component {
 					this.log.push({ role: "assistant", text: replyText });
 					this.scrollToBottom();
 					this.invalidate();
-					this.tui.requestRender();
+					this.requestRender(true);
 				}
 
 				// If the LLM wants to use tools, execute them
@@ -251,6 +258,9 @@ class BtwPanel implements Component {
 							};
 							this.sideMessages.push(errorResult);
 							this.log.push({ role: "tool", text: `⚠ ${errText}` });
+							this.scrollToBottom();
+							this.invalidate();
+							this.requestRender(true);
 							continue;
 						}
 
@@ -259,7 +269,7 @@ class BtwPanel implements Component {
 						this.log.push({ role: "tool", text: `⚙ ${toolLabel}` });
 						this.scrollToBottom();
 						this.invalidate();
-						this.tui.requestRender();
+						this.requestRender(true);
 
 						try {
 							const result = await tool.execute(
@@ -306,7 +316,7 @@ class BtwPanel implements Component {
 
 						this.scrollToBottom();
 						this.invalidate();
-						this.tui.requestRender();
+						this.requestRender(true);
 					}
 
 					// Continue the loop — the LLM will see the tool results
@@ -331,7 +341,7 @@ class BtwPanel implements Component {
 					this.log.push({ role: "assistant", text: detail });
 					this.scrollToBottom();
 					this.invalidate();
-					this.tui.requestRender();
+					this.requestRender(true);
 				}
 
 				break;
@@ -339,13 +349,13 @@ class BtwPanel implements Component {
 
 			this.stopThinking();
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender(true);
 		} catch (err: unknown) {
 			this.stopThinking();
 			this.errorText = `Error: ${err instanceof Error ? err.message : String(err)}`;
 			this.scrollToBottom();
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender(true);
 		}
 	}
 
@@ -371,10 +381,11 @@ class BtwPanel implements Component {
 		this.thinking = true;
 		this.thinkingDots = 0;
 		this.invalidate();
+		this.requestRender(true);
 		this.thinkingTimer = setInterval(() => {
 			this.thinkingDots = (this.thinkingDots + 1) % 4;
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender(true);
 		}, 300);
 	}
 
@@ -386,12 +397,20 @@ class BtwPanel implements Component {
 		}
 	}
 
+	private requestRender(force = true): void {
+		// Force full redraws for this overlay. pi-tui's incremental renderer tracks
+		// a scrollback-backed viewport; overlay updates can otherwise drift relative
+		// to that viewport and make the panel appear to move down.
+		(this.tui as any).requestRender(force);
+	}
+
 	// ── Scroll helpers ────────────────────────────────────────────────────────
 
 	/** Build the full unwrapped log lines so we can measure/scroll them. */
 	private buildAllLogLines(innerWidth: number): string[] {
 		const th = this.theme;
 		const lines: string[] = [];
+		const textWidth = Math.max(1, innerWidth - 2);
 
 		for (const msg of this.log) {
 			if (msg.role === "user") {
@@ -399,7 +418,7 @@ class BtwPanel implements Component {
 				lines.push(th.fg("accent", th.bold("You ")) + sep);
 			} else if (msg.role === "tool") {
 				// Tool messages are shown inline without a header separator
-				const wrapped = wrapTextWithAnsi(msg.text, innerWidth - 2);
+				const wrapped = wrapTextWithAnsi(msg.text, textWidth);
 				for (const line of wrapped) {
 					lines.push(" " + th.fg("dim", line));
 				}
@@ -408,7 +427,7 @@ class BtwPanel implements Component {
 				const sep = th.fg("dim", "─".repeat(Math.max(0, innerWidth - 5)));
 				lines.push(th.fg("success", th.bold("btw ")) + sep);
 			}
-			const wrapped = wrapTextWithAnsi(msg.text, innerWidth - 2);
+			const wrapped = wrapTextWithAnsi(msg.text, textWidth);
 			for (const line of wrapped) {
 				lines.push(" " + line);
 			}
@@ -421,7 +440,7 @@ class BtwPanel implements Component {
 			const spaces = " ".repeat(3 - this.thinkingDots);
 			lines.push(th.fg("warning", `  thinking ${dots}${spaces}`));
 		} else if (this.errorText) {
-			for (const line of wrapTextWithAnsi(this.errorText, innerWidth - 2)) {
+			for (const line of wrapTextWithAnsi(this.errorText, textWidth)) {
 				lines.push(th.fg("error", " " + line));
 			}
 		}
@@ -450,7 +469,7 @@ class BtwPanel implements Component {
 				this.abortController?.abort();
 				this.stopThinking();
 				this.invalidate();
-				this.tui.requestRender();
+				this.requestRender(true);
 			} else {
 				this.close();
 			}
@@ -466,81 +485,101 @@ class BtwPanel implements Component {
 		if (matchesKey(data, Key.up)) {
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, Key.down)) {
 			this.scrollOffset++;
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, Key.pageUp)) {
 			this.scrollOffset = Math.max(0, this.scrollOffset - 10);
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, Key.pageDown)) {
 			this.scrollOffset += 10;
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender();
 			return;
 		}
 
 		this.editor.handleInput(data);
 		this.invalidate();
-		this.tui.requestRender();
+		this.requestRender();
 	}
 
 	render(width: number): string[] {
-		// Fixed inner width: 70% of terminal, min 60, max terminal width
-		const panelWidth = Math.max(66, width);
-		if (this.cachedLines && this.cachedWidth === panelWidth) return this.cachedLines;
+		const termRows = (this.tui.terminal as any)?.rows ?? 24;
+		// The overlay manager already chose a width that fits on screen.  Never
+		// render wider than that width; otherwise centred overlays can spill past
+		// the terminal edge on narrow windows.
+		const panelWidth = Math.max(1, Math.floor(width));
+		if (this.cachedLines && this.cachedWidth === panelWidth && this.cachedRows === termRows) return this.cachedLines;
 
 		const th = this.theme;
-		const innerWidth = panelWidth - 2; // subtract the two border chars │ … │
+		const innerWidth = Math.max(0, panelWidth - 2); // subtract the two border chars │ … │
+		const fitLine = (line: string): string => truncateToWidth(line, panelWidth, "", true);
 
-		// Helper: wrap a line in side borders, padding to innerWidth
+		// Helper: wrap a line in side borders, clipping and padding to innerWidth
 		const bordered = (content: string): string => {
-			const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-			return th.fg("borderAccent", "│") + content + pad + th.fg("borderAccent", "│");
+			const safeContent = truncateToWidth(content, innerWidth, "", true);
+			return th.fg("borderAccent", "│") + safeContent + th.fg("borderAccent", "│");
 		};
 
-		// ── Pre-render chrome to measure its exact height ─────────────────
-		// Chrome = top border(1) + divider(1) + editor lines + help(1) + bottom(1)
-		const editorLines = this.editor.render(innerWidth);
-		const chromeHeight = 1 + 1 + editorLines.length + 1 + 1; // top + divider + editor + help + bottom
-
-		// ── Available log viewport ────────────────────────────────────────
-		// The overlay limits total rendered lines to maxHeight (85% of terminal).
-		const termRows = (this.tui.terminal as any)?.rows ?? 24;
-		const maxPanelRows = Math.floor(termRows * 0.90);
-		// Reserve 1 extra row for the optional scroll-hint line inside the log area
-		const logViewport = Math.max(2, maxPanelRows - chromeHeight - 1);
+		// ── Size the panel vertically ─────────────────────────────────────
+		// Keep our own rendered height within the intended panel height.  If the editor
+		// grows (long wrapped input, short terminal, resize), letting the overlay
+		// manager slice our output drops the bottom border and looks like the
+		// window has been pushed off-screen.
+		const maxPanelRows = Math.max(1, Math.min(termRows, Math.max(4, Math.floor(termRows * 0.90))));
+		const fixedChromeHeight = 1 + 1 + 1 + 1; // top + divider + help + bottom
+		const desiredMinLogRows = maxPanelRows >= 8 ? 1 : 0;
+		const maxEditorRows = Math.max(0, maxPanelRows - fixedChromeHeight - desiredMinLogRows);
+		const rawEditorLines = this.editor.render(innerWidth);
+		const fitBlock = (block: string[], maxRows: number): string[] => {
+			if (block.length <= maxRows) return block;
+			if (maxRows <= 0) return [];
+			if (maxRows === 1) return [block[block.length - 1] ?? ""];
+			return [block[0] ?? "", ...block.slice(-(maxRows - 1))];
+		};
+		const editorLines = fitBlock(rawEditorLines, maxEditorRows);
+		const chromeHeight = fixedChromeHeight + editorLines.length;
 
 		// ── Build full log lines (all messages) ───────────────────────────
 		const allLogLines = this.buildAllLogLines(innerWidth);
 		const totalLogLines = allLogLines.length;
 
-		// ── Clamp scroll offset ───────────────────────────────────────────
-		const maxScroll = Math.max(0, totalLogLines - logViewport);
+		// ── Available log viewport ────────────────────────────────────────
+		const logRowsAvailable = Math.max(0, maxPanelRows - chromeHeight);
+		let logViewport = logRowsAvailable;
+		let maxScroll = Math.max(0, totalLogLines - logViewport);
 		this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+		let canScrollUp = this.scrollOffset > 0;
+		let canScrollDown = this.scrollOffset < maxScroll;
+		let needsScrollHint = logRowsAvailable > 1 && (canScrollUp || canScrollDown);
+		if (needsScrollHint) {
+			logViewport = logRowsAvailable - 1;
+			maxScroll = Math.max(0, totalLogLines - logViewport);
+			this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+			canScrollUp = this.scrollOffset > 0;
+			canScrollDown = this.scrollOffset < maxScroll;
+			needsScrollHint = canScrollUp || canScrollDown;
+		}
 
 		// ── Slice the visible window ──────────────────────────────────────
-		const visibleLog = allLogLines.slice(this.scrollOffset, this.scrollOffset + logViewport);
-
-		// ── Scroll hint line ──────────────────────────────────────────────
-		// Show when there is content above/below the visible window
-		const canScrollUp = this.scrollOffset > 0;
-		const canScrollDown = this.scrollOffset < maxScroll;
-		const needsScrollHint = canScrollUp || canScrollDown;
+		const visibleLog = logViewport > 0
+			? allLogLines.slice(this.scrollOffset, this.scrollOffset + logViewport)
+			: [];
 
 		// ── Assemble final lines ──────────────────────────────────────────
 		const lines: string[] = [];
 
 		// Top border with centred title
-		const rawTitle = ` btw · ${this.modelShortId} `;
+		const rawTitle = truncateToWidth(` btw · ${this.modelShortId} `, innerWidth, "");
 		const titleStyled = th.fg("accent", rawTitle);
 		const totalDashes = Math.max(0, innerWidth - visibleWidth(rawTitle));
 		const lDashes = Math.floor(totalDashes / 2);
@@ -555,7 +594,7 @@ class BtwPanel implements Component {
 
 		// Log area
 		for (const l of visibleLog) {
-			lines.push(truncateToWidth(bordered(l), panelWidth));
+			lines.push(fitLine(bordered(l)));
 		}
 
 		// Scroll hint (counts as a log-area row, hence the -1 reservation above)
@@ -564,10 +603,10 @@ class BtwPanel implements Component {
 			const downPart = canScrollDown ? th.fg("dim", "↓ scroll down") : "";
 			const sep = canScrollUp && canScrollDown ? th.fg("dim", "  ·  ") : "";
 			const hintContent = "  " + upPart + sep + downPart;
-			lines.push(truncateToWidth(bordered(hintContent), panelWidth));
-		} else if (totalLogLines === 0) {
+			lines.push(fitLine(bordered(hintContent)));
+		} else if (totalLogLines === 0 && logRowsAvailable > 0) {
 			// Empty state — nothing rendered yet
-			lines.push(truncateToWidth(bordered(""), panelWidth));
+			lines.push(fitLine(bordered("")));
 		}
 
 		// Divider
@@ -579,7 +618,13 @@ class BtwPanel implements Component {
 
 		// Input editor (lines already computed above)
 		for (const el of editorLines) {
-			lines.push(truncateToWidth(th.fg("borderAccent", "│") + el + th.fg("borderAccent", "│"), panelWidth));
+			lines.push(
+				fitLine(
+					th.fg("borderAccent", "│") +
+						truncateToWidth(el, innerWidth, "", true) +
+						th.fg("borderAccent", "│"),
+				),
+			);
 		}
 
 		// Help text
@@ -589,7 +634,7 @@ class BtwPanel implements Component {
 		const helpText = this.copyFeedback
 			? th.fg("success", `  ${this.copyFeedback}`)
 			: th.fg("dim", helpParts);
-		lines.push(bordered(helpText));
+		lines.push(fitLine(bordered(helpText)));
 
 		// Bottom border
 		lines.push(
@@ -598,16 +643,16 @@ class BtwPanel implements Component {
 				th.fg("borderAccent", "╯"),
 		);
 
-		// Centre horizontally inside the full terminal width
-		const leftPad = " ".repeat(Math.max(0, Math.floor((width - panelWidth) / 2)));
-		this.cachedLines = lines.map((l) => leftPad + l);
+		this.cachedLines = lines.map(fitLine);
 		this.cachedWidth = panelWidth;
+		this.cachedRows = termRows;
 		return this.cachedLines;
 	}
 
 	invalidate(): void {
 		this.cachedLines = undefined;
 		this.cachedWidth = undefined;
+		this.cachedRows = undefined;
 		this.editor.invalidate();
 	}
 
@@ -627,12 +672,12 @@ class BtwPanel implements Component {
 		if (this.copyFeedbackTimer) clearTimeout(this.copyFeedbackTimer);
 		this.copyFeedback = msg;
 		this.invalidate();
-		this.tui.requestRender();
+		this.requestRender();
 		this.copyFeedbackTimer = setTimeout(() => {
 			this.copyFeedback = "";
 			this.copyFeedbackTimer = null;
 			this.invalidate();
-			this.tui.requestRender();
+			this.requestRender();
 		}, 2000);
 	}
 
@@ -724,7 +769,6 @@ export default function (pi: ExtensionAPI) {
 					overlay: true,
 					overlayOptions: {
 						width: "90%",
-						minWidth: 66,
 						maxHeight: "90%",
 						anchor: "center",
 					},
