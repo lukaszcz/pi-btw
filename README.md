@@ -8,7 +8,7 @@ A [pi](https://github.com/badlogic/pi-mono) extension that lets you ask side-que
 /btw <question>
 ```
 
-A floating overlay panel opens. It's seeded with a **read-only snapshot** of the current main conversation so the model has full context to answer your question. The panel supports a full back-and-forth exchange. When you close it, **nothing is written back to the main session** — the main context remains exactly as it was before you typed `/btw`.
+A chat view fills the entire terminal window, with no left/right frame or margins. The main pi interface is hidden until you close it. It's seeded with a **read-only snapshot** of the current main conversation so the model has full context to answer your question. The panel supports a full back-and-forth exchange. When you close it, **nothing is written back to the main session** — the main context remains exactly as it was before you typed `/btw`.
 
 ### Read-only tools
 
@@ -56,16 +56,16 @@ pi -e ./pi-btw/btw.ts
 1. When you run `/btw <question>`, the extension:
    - Reads the current session branch via `ctx.sessionManager.getBranch()`
    - Converts those messages to LLM format with `convertToLlm()`
-   - Opens a floating overlay using `ctx.ui.custom()` with `overlay: true` (90% width/height, centred)
+   - Opens a terminal-filling view using `ctx.ui.custom()` with `overlay: true` (100% width/height, no margins), covering the main UI
 
-2. Inside the overlay, every LLM call is:
+2. Inside the side chat, every LLM call is:
    - Passed `contextMessages` (the snapshot) + `sideMessages` (this panel's history)
    - Given read-only tools (`read`, `grep`, `find`, `ls`) created via `createReadOnlyTools()` from pi's SDK
    - Made via `complete()` from `@mariozechner/pi-ai` directly — no session involvement
    - Run in an agent loop: the model can request tools, see results, and continue until it produces a final text response or is aborted
 
 3. The main session's `appendMessage`, `sendMessage`, etc. are **never called**.
-   The overlay is purely display-side; closing it leaves zero traces in the main session.
+   The chat view is purely display-side; closing it restores the main UI and leaves zero traces in the main session.
 
 ## Requirements
 

@@ -4,7 +4,7 @@
  * Usage:
  *   /btw <question>
  *
- * Opens a floating overlay chat panel seeded with a snapshot of the current
+ * Opens a terminal-filling chat panel seeded with a snapshot of the current
  * main-conversation context.  You can have a full back-and-forth inside the
  * panel.  When you close it (Escape) nothing is written back to the main
  * session — the main context is untouched.
@@ -51,20 +51,20 @@ interface ChatMessage {
 // ─── BtwPanel ─────────────────────────────────────────────────────────────────
 
 /**
- * Floating overlay panel that hosts the side-conversation.
+ * Terminal-filling panel that hosts the side-conversation.
  *
  * Layout:
- *   ╭── btw · <model> ───────────────────╮
- *   │ You ─────────────────────────────  │  ← scrollable log area
- *   │  <user text>                        │
- *   │ btw ─────────────────────────────  │
- *   │  <assistant text>                   │
- *   │ [thinking...]                       │
- *   │ ↑↓ scroll · N/M lines              │  ← scroll hint (when needed)
- *   ├─────────────────────────────────────┤
- *   │ <editor for next question>          │
- *   │ Enter · send   Esc · close          │
- *   ╰─────────────────────────────────────╯
+ *   ── btw · <model> ─────────────────────
+ *   You ─────────────────────────────────  ← scrollable log area
+ *   <user text>
+ *   btw ─────────────────────────────────
+ *   <assistant text>
+ *   [thinking...]
+ *   ↑↓ scroll                              ← scroll hint (when needed)
+ *   ─────────────────────────────────────
+ *   <editor for next question>
+ *   Enter · send   Esc · close
+ *   ─────────────────────────────────────
  */
 class BtwPanel implements Component {
 	// Messages already in the main session at panel-open time
@@ -402,7 +402,7 @@ class BtwPanel implements Component {
 	private buildAllLogLines(innerWidth: number): string[] {
 		const th = this.theme;
 		const lines: string[] = [];
-		const textWidth = Math.max(1, innerWidth - 2);
+		const textWidth = Math.max(1, innerWidth);
 
 		for (const msg of this.log) {
 			if (msg.role === "user") {
@@ -412,7 +412,7 @@ class BtwPanel implements Component {
 				// Tool messages are shown inline without a header separator
 				const wrapped = wrapTextWithAnsi(msg.text, textWidth);
 				for (const line of wrapped) {
-					lines.push(" " + th.fg("dim", line));
+					lines.push(th.fg("dim", line));
 				}
 				continue;
 			} else {
@@ -421,7 +421,7 @@ class BtwPanel implements Component {
 			}
 			const wrapped = wrapTextWithAnsi(msg.text, textWidth);
 			for (const line of wrapped) {
-				lines.push(" " + line);
+				lines.push(line);
 			}
 			lines.push("");
 		}
@@ -430,10 +430,10 @@ class BtwPanel implements Component {
 		if (this.thinking) {
 			const dots = "•".repeat(this.thinkingDots + 1);
 			const spaces = " ".repeat(3 - this.thinkingDots);
-			lines.push(th.fg("warning", `  thinking ${dots}${spaces}`));
+			lines.push(th.fg("warning", `thinking ${dots}${spaces}`));
 		} else if (this.errorText) {
 			for (const line of wrapTextWithAnsi(this.errorText, textWidth)) {
-				lines.push(th.fg("error", " " + line));
+				lines.push(th.fg("error", line));
 			}
 		}
 
@@ -506,28 +506,19 @@ class BtwPanel implements Component {
 
 	render(width: number): string[] {
 		const termRows = (this.tui.terminal as any)?.rows ?? 24;
-		// The overlay manager already chose a width that fits on screen.  Never
-		// render wider than that width; otherwise centred overlays can spill past
-		// the terminal edge on narrow windows.
+		// Respect the available terminal width, including after a resize.
 		const panelWidth = Math.max(1, Math.floor(width));
 		if (this.cachedLines && this.cachedWidth === panelWidth && this.cachedRows === termRows) return this.cachedLines;
 
 		const th = this.theme;
-		const innerWidth = Math.max(0, panelWidth - 2); // subtract the two border chars │ … │
+		const innerWidth = panelWidth; // no side borders or horizontal margins
 		const fitLine = (line: string): string => truncateToWidth(line, panelWidth, "", true);
-
-		// Helper: wrap a line in side borders, clipping and padding to innerWidth
-		const bordered = (content: string): string => {
-			const safeContent = truncateToWidth(content, innerWidth, "", true);
-			return th.fg("borderAccent", "│") + safeContent + th.fg("borderAccent", "│");
-		};
 
 		// ── Size the panel as a fixed-height canvas ───────────────────────
 		// Returning a stable line count avoids pi-tui's incremental renderer taking
-		// a scroll-producing path when overlay content grows or shrinks.  The log
-		// area expands/contracts to absorb editor height changes, while the outer
-		// overlay rectangle stays the same height.
-		const panelRows = Math.max(1, Math.floor(termRows * 0.90));
+		// a scroll-producing path when content grows or shrinks.  The log area
+		// absorbs editor height changes while the panel fills the terminal.
+		const panelRows = Math.max(1, Math.floor(termRows));
 		const fixedChromeHeight = 1 + 1 + 1 + 1; // top + divider + help + bottom
 		const desiredMinLogRows = panelRows >= 8 ? 1 : 0;
 		const maxEditorRows = Math.max(0, panelRows - fixedChromeHeight - desiredMinLogRows);
@@ -565,26 +556,24 @@ class BtwPanel implements Component {
 		// ── Assemble final lines ──────────────────────────────────────────
 		const lines: string[] = [];
 
-		// Top border with centred title
+		// Full-width header with centred title
 		const rawTitle = truncateToWidth(` btw · ${this.modelShortId} `, innerWidth, "");
 		const titleStyled = th.fg("accent", rawTitle);
 		const totalDashes = Math.max(0, innerWidth - visibleWidth(rawTitle));
 		const lDashes = Math.floor(totalDashes / 2);
 		const rDashes = totalDashes - lDashes;
 		lines.push(
-			th.fg("borderAccent", "╭") +
-				th.fg("dim", "─".repeat(lDashes)) +
+			th.fg("dim", "─".repeat(lDashes)) +
 				titleStyled +
-				th.fg("dim", "─".repeat(rDashes)) +
-				th.fg("borderAccent", "╮"),
+				th.fg("dim", "─".repeat(rDashes)),
 		);
 
 		// Log area: exactly logViewport rows, padded with blanks if needed.
 		for (const l of visibleLog) {
-			lines.push(fitLine(bordered(l)));
+			lines.push(fitLine(l));
 		}
 		for (let i = visibleLog.length; i < logViewport; i++) {
-			lines.push(fitLine(bordered("")));
+			lines.push(fitLine(""));
 		}
 
 		// Reserved scroll/status row, blank when no hint is needed.
@@ -593,54 +582,41 @@ class BtwPanel implements Component {
 				const upPart = canScrollUp ? th.fg("dim", "↑ scroll up") : "";
 				const downPart = canScrollDown ? th.fg("dim", "↓ scroll down") : "";
 				const sep = canScrollUp && canScrollDown ? th.fg("dim", "  ·  ") : "";
-				const hintContent = "  " + upPart + sep + downPart;
-				lines.push(fitLine(bordered(hintContent)));
+				const hintContent = upPart + sep + downPart;
+				lines.push(fitLine(hintContent));
 			} else {
-				lines.push(fitLine(bordered("")));
+				lines.push(fitLine(""));
 			}
 		}
 
 		// Divider
-		lines.push(
-			th.fg("borderAccent", "├") +
-				th.fg("dim", "─".repeat(innerWidth)) +
-				th.fg("borderAccent", "┤"),
-		);
+		lines.push(th.fg("dim", "─".repeat(innerWidth)));
 
 		// Input editor (lines already computed above)
 		for (const el of editorLines) {
-			lines.push(
-				fitLine(
-					th.fg("borderAccent", "│") +
-						truncateToWidth(el, innerWidth, "", true) +
-						th.fg("borderAccent", "│"),
-				),
-			);
+			lines.push(fitLine(el));
 		}
 
 		// Help text
 		const helpParts = this.thinking
-			? "  Esc · cancel"
-			: "  Enter · send   ↑↓ · scroll   Ctrl+C · copy   Esc · close";
+			? "Esc · cancel"
+			: "Enter · send   ↑↓ · scroll   Ctrl+C · copy   Esc · close";
 		const helpText = this.copyFeedback
-			? th.fg("success", `  ${this.copyFeedback}`)
+			? th.fg("success", this.copyFeedback)
 			: th.fg("dim", helpParts);
-		lines.push(fitLine(bordered(helpText)));
+		lines.push(fitLine(helpText));
 
-		// Bottom border
-		const bottomBorder =
-			th.fg("borderAccent", "╰") +
-			th.fg("borderAccent", "─".repeat(innerWidth)) +
-			th.fg("borderAccent", "╯");
-		lines.push(bottomBorder);
+		// Bottom separator
+		const bottomSeparator = th.fg("borderAccent", "─".repeat(innerWidth));
+		lines.push(bottomSeparator);
 
 		let finalLines = lines.map(fitLine);
 		while (finalLines.length < panelRows) {
-			finalLines.splice(Math.max(1, finalLines.length - 1), 0, fitLine(bordered("")));
+			finalLines.splice(Math.max(1, finalLines.length - 1), 0, fitLine(""));
 		}
 		if (finalLines.length > panelRows) {
 			finalLines = finalLines.slice(0, panelRows);
-			finalLines[panelRows - 1] = fitLine(bottomBorder);
+			finalLines[panelRows - 1] = fitLine(bottomSeparator);
 		}
 
 		this.cachedLines = finalLines;
@@ -700,7 +676,7 @@ class BtwPanel implements Component {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("btw", {
-		description: "Ask a side-question in an isolated overlay — the main context is never modified",
+		description: "Ask a side-question in a terminal-filling chat — the main context is never modified",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("/btw requires interactive mode", "error");
@@ -766,11 +742,14 @@ export default function (pi: ExtensionAPI) {
 						pi.getThinkingLevel(),
 					),
 				{
+					// Non-overlay custom UI replaces only pi's editor. Cover the
+					// entire terminal instead, hiding the main UI until we close.
 					overlay: true,
 					overlayOptions: {
-						width: "90%",
-						maxHeight: "90%",
-						anchor: "center",
+						width: "100%",
+						maxHeight: "100%",
+						anchor: "top-left",
+						margin: 0,
 					},
 				},
 			);
