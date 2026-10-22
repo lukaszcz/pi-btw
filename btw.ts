@@ -91,6 +91,15 @@ class BtwPanel implements Component {
 	private cachedLines: string[] | undefined;
 	private cachedWidth: number | undefined;
 	private cachedRows: number | undefined;
+	private disposed = false;
+	private removeInputListener: (() => void) | undefined;
+
+	private readonly redrawTerminal = (): void => {
+		this.invalidate();
+		// tmux can move the hardware cursor when panes change. Rebuild pi's
+		// viewport from the terminal origin instead of using stale cursor offsets.
+		this.requestRender(true);
+	};
 
 	constructor(
 		private readonly tui: TUI,
@@ -128,6 +137,16 @@ class BtwPanel implements Component {
 			this.sendQuestion(trimmed);
 		};
 
+		this.removeInputListener = this.tui.addInputListener((data) => {
+			if (data === "\x1b[I") {
+				this.redrawTerminal();
+				return { consume: true };
+			}
+			if (data === "\x1b[O") return { consume: true };
+		});
+		this.tui.terminal.write("\x1b[?1004h"); // enable terminal focus reports
+		process.stdout.on("resize", this.redrawTerminal);
+
 		// Inject a preamble so the model understands the side-conversation context
 		const availableNames = this.agentTools.map((t) => t.name).join(", ");
 		this.sideMessages.push({
@@ -144,6 +163,7 @@ class BtwPanel implements Component {
 
 		// Start with the initial question from the /btw command
 		this.sendQuestion(firstQuestion);
+		this.redrawTerminal();
 	}
 
 	// ── Sending ──────────────────────────────────────────────────────────────
@@ -660,12 +680,16 @@ class BtwPanel implements Component {
 	// ── Lifecycle ────────────────────────────────────────────────────────────
 
 	private close(): void {
-		this.abortController?.abort();
-		this.stopThinking();
+		this.dispose();
 		this.done(null);
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.removeInputListener?.();
+		process.stdout.off("resize", this.redrawTerminal);
+		this.tui.terminal.write("\x1b[?1004l");
 		this.abortController?.abort();
 		this.stopThinking();
 		if (this.copyFeedbackTimer) clearTimeout(this.copyFeedbackTimer);
